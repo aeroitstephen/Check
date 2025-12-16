@@ -12,6 +12,7 @@ class CheckOptions {
     this.currentSection = "general";
     this.configViewMode = "formatted"; // "formatted" or "raw"
     this.currentConfigData = null;
+    this.detectionRulesCacheInfo = null;
     this.isEnterpriseManaged = false; // Track enterprise management state
     this.simulateEnterpriseMode = false; // Track simulated enterprise mode (dev only)
 
@@ -1321,24 +1322,50 @@ class CheckOptions {
       this.elements.configDisplay.innerHTML =
         '<div class="config-loading">Loading configuration...</div>';
 
-      const controller = new AbortController();
-      const timeoutId = setTimeout(() => controller.abort(), 5000);
+      let config = null;
+      this.detectionRulesCacheInfo = null;
 
       try {
-        const response = await fetch(
-          chrome.runtime.getURL("rules/detection-rules.json"),
-          { signal: controller.signal }
+        const response = await this.sendMessage({
+          type: "get_detection_rules",
+        });
+
+        if (response?.success && response.rules) {
+          config = response.rules;
+          this.detectionRulesCacheInfo = response.cacheInfo || null;
+        } else {
+          throw new Error(response?.error || "No detection rules returned");
+        }
+      } catch (error) {
+        console.warn(
+          "Failed to load detection rules from background, falling back to packaged file:",
+          error
         );
-        clearTimeout(timeoutId);
 
-        if (!response.ok) throw new Error(`HTTP ${response.status}`);
-        const config = await response.json();
+        const controller = new AbortController();
+        const timeoutId = setTimeout(() => controller.abort(), 5000);
 
-        this.currentConfigData = config;
-        this.updateConfigDisplay();
-      } finally {
-        clearTimeout(timeoutId);
+        try {
+          const response = await fetch(
+            chrome.runtime.getURL("rules/detection-rules.json"),
+            { signal: controller.signal }
+          );
+          clearTimeout(timeoutId);
+
+          if (!response.ok) throw new Error(`HTTP ${response.status}`);
+          config = await response.json();
+
+          this.detectionRulesCacheInfo = {
+            remoteUrl: chrome.runtime.getURL("rules/detection-rules.json"),
+            hasCachedRules: false,
+          };
+        } finally {
+          clearTimeout(timeoutId);
+        }
       }
+
+      this.currentConfigData = config;
+      this.updateConfigDisplay();
     } catch (error) {
       console.error("Failed to load config display:", error);
       if (this.elements.configDisplay) {
@@ -1353,6 +1380,17 @@ class CheckOptions {
 
     const sections = [];
 
+    const cacheInfo = this.detectionRulesCacheInfo || {};
+    const cacheAgeMinutes = cacheInfo.cacheAge
+      ? Math.round(cacheInfo.cacheAge / 60000)
+      : null;
+    const cacheAgeDisplay = cacheAgeMinutes
+      ? `${cacheAgeMinutes} minute${cacheAgeMinutes === 1 ? "" : "s"}`
+      : "unknown";
+    const cacheUpdated = cacheInfo.lastUpdate
+      ? new Date(cacheInfo.lastUpdate).toLocaleString()
+      : "unknown";
+
     // Basic info
     sections.push(`
       <div class="config-section">
@@ -1366,6 +1404,18 @@ class CheckOptions {
         <div class="config-item"><strong>Description:</strong> ${
           config.description || "No description"
         }</div>
+        <div class="config-item"><strong>Loaded From:</strong> <span class="config-value">${
+          cacheInfo.remoteUrl || "Local packaged rules"
+        }</span></div>
+        <div class="config-item"><strong>Cache Status:</strong> <span class="config-value">${
+          cacheInfo.hasCachedRules === false
+            ? "Loaded fresh"
+            : cacheInfo.isExpired
+            ? "Expired cache"
+            : "Cached"
+        }</span></div>
+        <div class="config-item"><strong>Last Cache Update:</strong> <span class="config-value">${cacheUpdated}</span></div>
+        <div class="config-item"><strong>Cache Age:</strong> <span class="config-value">${cacheAgeDisplay}</span></div>
       </div>
     `);
 
